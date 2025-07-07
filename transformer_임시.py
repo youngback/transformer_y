@@ -68,22 +68,27 @@ class TinyTransformer(nn.Module):
         super().__init__()
         self.token_emb = nn.Embedding(vocab_size, embed_dim)  # 단어 임베딩
         self.attn = MultiHeadSelfAttention(embed_dim, num_heads)  # 셀프 어텐션
-        self.norm = nn.LayerNorm(embed_dim)   #정규화
+        #self.norm = nn.LayerNorm(embed_dim)   #정규화
         self.lm_head = nn.Linear(embed_dim, vocab_size)  # 출력 예측 (language modeling head)
 
     def forward(self, x):
         x = self.token_emb(x)  # [B, T, C]
-        x_norm = self.norm(x)               # 정규화
-        x_attn, attn = self.attn(x_norm)    # 어텐션 결과와 가중치
-        x = x + x_attn                      #  Residual 연결
+        x, attn = self.attn(x)  # 정규화 X는 이줄 활성화 후 밑 3줄, 위에 정규화 파트 주석처리
+        #x_norm = self.norm(x)               # 정규화
+        #x_attn, attn = self.attn(x_norm)    # 어텐션 결과와 가중치
+        #x = x + x_attn                      #  Residual 연결
         logits = self.lm_head(x)  # 다음 토큰 예측
+   
 
         return logits, attn
 
 from datasets import load_dataset
 
 # TinyStories 데이터셋 직접 불러오기 (샘플 50000개만 사용)
-dataset = load_dataset("roneneldan/TinyStories", split="train[:50000]")
+dataset_full = load_dataset("roneneldan/TinyStories", split="train[:50000]")
+# 2회자, 재다운로드 방지
+# 앞에서 5000개만 뽑기
+dataset = dataset_full.select(range(50000))
 # 텍스트 추출
 text = "\n".join(example["text"] for example in dataset)
 
@@ -193,7 +198,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
 
 # 간단한 학습 루프 (3 epoch)
 model.train()
-for epoch in range(3):
+for epoch in range(10):
     total_loss = 0
     for x, y in dataloader:
         x, y = x.to(device), y.to(device)
@@ -215,14 +220,22 @@ with torch.no_grad():
     _, demo_attn = model(demo_inputs["input_ids"])  # 어텐션 가중치 추출
 
 # attention 가중치 표 출력 함수 정의
-def print_attention_table(attn_weights, tokens, head=0, batch=0):
-    attn = attn_weights[batch, head].detach().cpu().numpy()  # numpy 변환
-    df = pd.DataFrame(attn, index=tokens, columns=tokens)  # pandas 표
-    print(f"\n🔹 Attention Head {head} Weights:")
-    print(df.round(2))  # 소수점 2자리
+def print_attention_avg(attn_weights, tokens, batch=0):
+    attn = attn_weights[batch].mean(dim=0).detach().cpu().numpy()
+    df = pd.DataFrame(attn, index=tokens, columns=tokens)
+    print(f"\n🔹 Attention Heads Average Weights:")
+    print(df.round(2))
 
-# 데모 입력에 대한 Head 0의 어텐션 표 출력
-print_attention_table(demo_attn, demo_tokens, head=0)
+def print_attention_all_heads(attn_weights, tokens, batch=0):
+    num_heads = attn_weights.shape[1]
+    for h in range(num_heads):
+        attn = attn_weights[batch, h].detach().cpu().numpy()  # Head h에 대한 attention matrix
+        df = pd.DataFrame(attn, index=tokens, columns=tokens)
+        print(f"\n🔹 Head {h} Attention Weights:")
+        print(df.round(2))
+
+# 데모 입력에 대한 Head 평균의 어텐션 표 출력
+print_attention_avg(demo_attn, demo_tokens, batch=0)
 
 demo_text2 = "Israel England France Iran" #이곳에 단어 입력 --------------------------------------------->
 demo_tokens = tokenizer.tokenize(demo_text2)  # 토큰 문자열
@@ -231,12 +244,5 @@ demo_inputs = tokenizer(demo_text2, return_tensors="pt").to(device)
 with torch.no_grad():
     _, demo_attn = model(demo_inputs["input_ids"])  # 어텐션 가중치 추출
 
-# attention 가중치 표 출력 함수 정의
-def print_attention_table(attn_weights, tokens, head=0, batch=0):
-    attn = attn_weights[batch, head].detach().cpu().numpy()  # numpy 변환
-    df = pd.DataFrame(attn, index=tokens, columns=tokens)  # pandas 표
-    print(f"\n🔹 Attention Head {head} Weights:")
-    print(df.round(2))  # 소수점 2자리
-
-# 데모 입력에 대한 Head 0의 어텐션 표 출력
-print_attention_table(demo_attn, demo_tokens, head=0)
+# 데모 입력에 대한 Head 평균의 어텐션 표 출력
+print_attention_avg(demo_attn, demo_tokens, batch=0)
