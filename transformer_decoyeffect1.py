@@ -20,6 +20,7 @@ import torch.nn.functional as F  # 활성함수 등
 import pandas as pd              # 표 형태 출력을 위한 모듈
 from transformers import GPT2Tokenizer  # 토큰화를 위한 HuggingFace GPT2 tokenizer
 from torch.utils.data import DataLoader, Dataset  # 데이터셋 관리
+from sklearn.metrics.pairwise import cosine_similarity
 import random
 
 # GPU 설정 (가능하면 CUDA 사용)
@@ -85,10 +86,10 @@ class TinyTransformer(nn.Module):
 from datasets import load_dataset
 
 # TinyStories 데이터셋 직접 불러오기 (샘플 50000개만 사용)
-dataset_full = load_dataset("roneneldan/TinyStories", split="train[:500]")
+dataset_full = load_dataset("roneneldan/TinyStories", split="train")
 # 2회자, 재다운로드 방지
 # 앞에서 5000개만 뽑기
-dataset = dataset_full.select(range(500))
+dataset = dataset_full.select(range(50000))
 # 텍스트 추출
 text = "\n".join(example["text"] for example in dataset)
 
@@ -165,6 +166,7 @@ class BPETokenizer:
         return b"".join([self.vocab[i] for i in ids]).decode("utf-8", errors="ignore")
 '''
 
+
 # PyTorch Dataset 정의
 class SimpleDataset(Dataset):
     def __init__(self, data):
@@ -239,10 +241,59 @@ def print_attention_focus_avg(attn_weights, tokens, batch=0):
     print(f"\n🔹 Head 평균 기준 '{tokens[0]}' → 나머지 3개 토큰 집중도 (%):")
     print(df.round(1))
 
+def print_token_cosine_similarity(text, model, tokenizer):
+    """
+    주어진 텍스트 내 각 토큰의 **문맥 반영 임베딩 벡터** 간 코사인 유사도를 계산하고 표로 출력한다.
+    """
+    tokens = tokenizer.tokenize(text)
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(device)
+
+    with torch.no_grad():
+        x = model.token_emb(input_ids)  # [1, T, C]
+        contextual_embeddings, _ = model.attn(x)  # [1, T, C]
+        embeddings = contextual_embeddings[0]     # 시퀀스 차원만 추출 (T, C)
+
+    embed_np = embeddings.cpu().numpy()
+    sim_matrix = cosine_similarity(embed_np)
+
+    df = pd.DataFrame(sim_matrix, index=tokens, columns=tokens)
+    print(f"\n🔹 Cosine Similarity Between Tokens (Contextualized):")
+    print(df.round(2))
+
+def print_cosine_focus_on_first_token(text, model, tokenizer):
+    """
+    주어진 텍스트에서 첫 번째 토큰이 나머지 토큰들과 얼마나 유사한지를
+    문맥 반영 임베딩을 기준으로 코사인 유사도 백분율로 출력.
+    """
+    tokens = tokenizer.tokenize(text)
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(device)
+
+    with torch.no_grad():
+        x = model.token_emb(input_ids)  # [1, T, C]
+        contextual_embeddings, _ = model.attn(x)  # [1, T, C]
+        embeddings = contextual_embeddings[0]     # [T, C]
+
+    embed_np = embeddings.cpu().numpy()
+    sim_matrix = cosine_similarity(embed_np)
+
+    first_token_sims = sim_matrix[0, 1:]  # 첫 번째 토큰이 나머지 토큰들과 얼마나 유사한지
+    total = first_token_sims.sum()
+
+    if total == 0:
+        percentages = [0] * len(first_token_sims)
+    else:
+        percentages = (first_token_sims / total) * 100
+
+    df = pd.DataFrame([percentages], columns=tokens[1:], index=[f"{tokens[0]} →"])
+    print(f"\n🔹 문맥 임베딩 기준 '{tokens[0]}' → 나머지 토큰 유사도 집중도 (%):")
+    print(df.round(1))
+
 # 데모 입력에 대한 Head 평균의 어텐션 표 출력
 print_attention_avg(demo_attn, demo_tokens, batch=0)
 
 print_attention_focus_avg(demo_attn, demo_tokens)
+print_token_cosine_similarity(demo_text1, model, tokenizer)
+print_cosine_focus_on_first_token(demo_text1, model, tokenizer)
 
 demo_text2 = "Israel England France Iran" #이곳에 단어 입력 --------------------------------------------->
 demo_tokens = tokenizer.tokenize(demo_text2)  # 토큰 문자열
@@ -255,3 +306,5 @@ with torch.no_grad():
 print_attention_avg(demo_attn, demo_tokens, batch=0)
 
 print_attention_focus_avg(demo_attn, demo_tokens)
+print_token_cosine_similarity(demo_text2, model, tokenizer)
+print_cosine_focus_on_first_token(demo_text2, model, tokenizer)
