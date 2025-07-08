@@ -85,10 +85,10 @@ class TinyTransformer(nn.Module):
 from datasets import load_dataset
 
 # TinyStories 데이터셋 직접 불러오기 (샘플 50000개만 사용)
-dataset_full = load_dataset("roneneldan/TinyStories", split="train[:50000]")
+dataset_full = load_dataset("roneneldan/TinyStories", split="train[:500]")
 # 2회자, 재다운로드 방지
 # 앞에서 5000개만 뽑기
-dataset = dataset_full.select(range(50000))
+dataset = dataset_full.select(range(500))
 # 텍스트 추출
 text = "\n".join(example["text"] for example in dataset)
 
@@ -103,8 +103,13 @@ encodings = tokenizer(text, return_tensors="pt", padding=True, truncation=True, 
 input_ids = encodings["input_ids"]  # [num_sentences, seq_len]
 
 '''
+import re
 from collections import defaultdict
 from torch.nn.utils.rnn import pad_sequence
+
+# 간단한 pre-tokenization: 공백 + 특수문자 기준으로 토큰 분리
+def simple_pre_tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
 
 # merge 함수: (a,b) 쌍을 new_index로 묶기
 def merge(indices, pair, new_index):
@@ -139,39 +144,25 @@ def train_bpe(text: str, num_merges: int):
 
     return {"vocab": vocab, "merges": merges}
 
-# BPE 토크나이저 클래스
+# 개선된 BPE 토크나이저
 class BPETokenizer:
     def __init__(self, vocab, merges):
-        self.vocab = vocab            # {int: bytes} 형태
+        self.vocab = vocab            # {int: bytes}
         self.merges = merges          # {(a,b): new_index}
-        self.inverse_vocab = {v: k for k, v in vocab.items()}  # bytes -> int 역매핑
+        self.inverse_vocab = {v: k for k, v in vocab.items()}  # bytes -> int
 
-    def encode(self, text: str):
-        ids = list(text.encode("utf-8"))
-        for (a, b), new_id in self.merges.items():
-            ids = merge(ids, (a, b), new_id)
+    def encode(self, text: str) -> list[int]:
+        tokens = simple_pre_tokenize(text)  # 공백, 구두점 등 기준으로 토큰화
+        ids = []
+        for token in tokens:
+            byte_ids = list(token.encode("utf-8"))
+            for (a, b), new_id in self.merges.items():
+                byte_ids = merge(byte_ids, (a, b), new_id)
+            ids.extend(byte_ids)
         return ids
 
-    def decode(self, ids: list[int]):
+    def decode(self, ids: list[int]) -> str:
         return b"".join([self.vocab[i] for i in ids]).decode("utf-8", errors="ignore")
-
-# -----------------------
-# 여기부터 GPT2Tokenizer 대체 부분
-
-# 1) BPE 학습 (num_merges는 적절히 조절)
-tokenizer_params = train_bpe(text, num_merges=1000)
-
-# 2) 토크나이저 객체 생성
-tokenizer = BPETokenizer(**tokenizer_params)
-
-# 3) 텍스트 줄 단위로 토크나이징 및 텐서화
-lines = text.split("\n")
-tokenized_ids = [torch.tensor(tokenizer.encode(line)) for line in lines]
-
-# 4) 패딩 (패딩 토큰 ID는 0으로 지정)
-input_ids = pad_sequence(tokenized_ids, batch_first=True, padding_value=0)  # shape: [num_sentences, seq_len]
-
-# 이제 input_ids를 기존 GPT2Tokenizer 대체해서 학습에 바로 사용 가능
 '''
 
 # PyTorch Dataset 정의
@@ -234,8 +225,24 @@ def print_attention_all_heads(attn_weights, tokens, batch=0):
         print(f"\n🔹 Head {h} Attention Weights:")
         print(df.round(2))
 
+def print_attention_focus_avg(attn_weights, tokens, batch=0):
+    """
+    어텐션 가중치에서 batch=0의 평균 헤드 기준으로
+    첫 번째 토큰이 나머지 3개 토큰(1~3)에 얼마나 집중하는지를 백분율로 출력
+    """
+    attn = attn_weights[batch].mean(dim=0).detach().cpu().numpy()  # Head 평균
+    values = attn[0, 1:]  # 첫 번째 토큰이 1~3번째에 주는 가중치
+    total = values.sum()
+    percentages = (values / total) * 100
+
+    df = pd.DataFrame([percentages], columns=tokens[1:], index=[f"{tokens[0]} →"])
+    print(f"\n🔹 Head 평균 기준 '{tokens[0]}' → 나머지 3개 토큰 집중도 (%):")
+    print(df.round(1))
+
 # 데모 입력에 대한 Head 평균의 어텐션 표 출력
 print_attention_avg(demo_attn, demo_tokens, batch=0)
+
+print_attention_focus_avg(demo_attn, demo_tokens)
 
 demo_text2 = "Israel England France Iran" #이곳에 단어 입력 --------------------------------------------->
 demo_tokens = tokenizer.tokenize(demo_text2)  # 토큰 문자열
@@ -246,3 +253,5 @@ with torch.no_grad():
 
 # 데모 입력에 대한 Head 평균의 어텐션 표 출력
 print_attention_avg(demo_attn, demo_tokens, batch=0)
+
+print_attention_focus_avg(demo_attn, demo_tokens)
